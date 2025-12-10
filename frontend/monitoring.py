@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from enum import Enum
 
-from frontend.resilient_client import ErrorType
+from resilient_client import ErrorType
 
 
 class LogLevel(Enum):

@@ -11,7 +11,7 @@ from typing import Optional, Callable, Any, TypeVar
 from functools import wraps
 from datetime import datetime
 
-from frontend.resilient_client import APIResponse, ErrorType
+from resilient_client import APIResponse, ErrorType
 
 logger = logging.getLogger(__name__)
 

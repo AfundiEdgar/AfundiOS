@@ -13,8 +13,8 @@ import logging
 import streamlit as st
 from datetime import datetime
 
-from frontend.resilient_client import ResilientClient, RetryConfig, APIResponse
-from frontend.error_handlers import UIErrorHandler, BackendHealthCheck, FallbackContent
+from resilient_client import ResilientClient, RetryConfig, APIResponse
+from error_handlers import UIErrorHandler, BackendHealthCheck, FallbackContent
 
 # Configure logging
 logging.basicConfig(
