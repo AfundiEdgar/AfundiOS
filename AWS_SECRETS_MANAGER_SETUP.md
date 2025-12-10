@@ -200,6 +200,17 @@ AWS_BEDROCK_SECRET_NAME=prod/aws/bedrock
 # Set your LLM provider
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-4o-mini
+
+# Local LLM (optional)
+# You can store local LLM credentials (URL and/or API key) in Secrets Manager.
+# Example secret (JSON):
+# {
+#   "url": "http://localhost:8000/v1",
+#   "api_key": "sk-local-xxxxx"
+# }
+# Set the secret name in .env to allow automatic loading for LLM_PROVIDER=local
+# Example:
+# LOCAL_LLM_SECRET_NAME=dev/llm/local-ollama
 ```
 
 ### Configuration Priority

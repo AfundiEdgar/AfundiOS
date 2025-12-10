@@ -277,6 +277,7 @@ api_key = manager.get_secret_value("dev_llm_openai")
 | `ANTHROPIC_SECRET_NAME` | Optional[str] | `None` | AWS secret name for Anthropic |
 | `COHERE_SECRET_NAME` | Optional[str] | `None` | AWS secret name for Cohere |
 | `AWS_BEDROCK_SECRET_NAME` | Optional[str] | `None` | AWS secret name for AWS Bedrock |
+| `LOCAL_LLM_SECRET_NAME` | Optional[str] | `None` | Optional secret name for local LLM (contains `url` and/or `api_key`) |
 
 ## Supported LLM Providers
 
@@ -288,7 +289,7 @@ All existing LLM providers are supported:
 | Anthropic | `ANTHROPIC_SECRET_NAME` | `{"api_key": "sk-ant-..."}` |
 | Cohere | `COHERE_SECRET_NAME` | `{"api_key": "..."}` |
 | AWS Bedrock | `AWS_BEDROCK_SECRET_NAME` | `{"access_key_id": "...", "secret_access_key": "..."}` |
-| Local | None | N/A |
+| Local | `LOCAL_LLM_SECRET_NAME` (optional) | `{"url":"http://localhost:8000/v1", "api_key":"sk-local-..."}` |
 
 ## Getting Started
 

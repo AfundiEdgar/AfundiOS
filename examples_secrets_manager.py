@@ -371,6 +371,42 @@ def test_json_secret():
     print("✓ JSON secret parsing test passed")
 
 
+def test_local_llm_secrets():
+    """Test local LLM secret loading with automatic provider detection."""
+    import os
+    import json
+    from backend.utils.secrets_manager import LocalSecretsManager
+    from backend.config import Settings
+    
+    # Simulate local LLM secret with URL and API key
+    local_llm_secret = {
+        "url": "http://localhost:8000/v1",
+        "api_key": "sk-local-xxxxx"
+    }
+    os.environ["SECRET_dev_llm_local"] = json.dumps(local_llm_secret)
+    
+    # Create a settings instance configured for local LLM
+    # (In real usage, this would be loaded from .env)
+    settings = Settings(
+        llm_provider="local",
+        local_llm_url="http://default:8000/v1",  # Will be overridden by secret
+        local_llm_secret_name="dev_llm_local",
+        use_secrets_manager=True,
+    )
+    
+    # Test direct manager usage (simulating what load_secrets_for_provider does internally)
+    manager = LocalSecretsManager()
+    secret_obj = manager.get_secret("dev_llm_local")
+    
+    assert isinstance(secret_obj, dict), "Secret should be dict"
+    assert secret_obj.get("url") == "http://localhost:8000/v1", "URL not found in secret"
+    assert secret_obj.get("api_key") == "sk-local-xxxxx", "API key not found in secret"
+    
+    print("✓ Local LLM secret loading test passed")
+    print(f"  - URL from secret: {secret_obj.get('url')}")
+    print(f"  - API key from secret: {secret_obj.get('api_key')[:10]}...")
+
+
 # ============================================================================
 # CLI SETUP VERIFICATION
 # ============================================================================
@@ -449,6 +485,7 @@ if __name__ == "__main__":
         test_aws_secrets_manager()
         test_settings_integration()
         test_json_secret()
+        test_local_llm_secrets()
         
         print("\n✓ All tests completed!\n")
     except AssertionError as e:

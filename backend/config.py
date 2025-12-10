@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     anthropic_secret_name: Optional[str] = None  # Secret name for Anthropic credentials
     cohere_secret_name: Optional[str] = None  # Secret name for Cohere credentials
     aws_bedrock_secret_name: Optional[str] = None  # Secret name for AWS Bedrock credentials
+    # Local LLM secret/config names
+    local_llm_secret_name: Optional[str] = None  # Secret name for local LLM (url, api_key)
+    local_llm_api_key: Optional[str] = None  # API key or token for local LLM (if applicable)
     
     # LLM Parameters
     llm_temperature: float = 0.0
@@ -380,11 +383,13 @@ class Settings(BaseSettings):
         )
         
         # Map providers to their secret names and fields
+        # field_name is the Settings attribute to populate, secret_key is the key inside the JSON secret
         provider_secrets = {
             'openai': ('openai_secret_name', 'openai_api_key', 'api_key'),
             'anthropic': ('anthropic_secret_name', 'anthropic_api_key', 'api_key'),
             'cohere': ('cohere_secret_name', 'cohere_api_key', 'api_key'),
             'aws_bedrock': ('aws_bedrock_secret_name', None, None),
+            'local': ('local_llm_secret_name', None, None),
         }
         
         if self.llm_provider not in provider_secrets:
@@ -406,6 +411,48 @@ class Settings(BaseSettings):
                 self.aws_access_key_id = self.get_secret(secret_name, "access_key_id")
                 self.aws_secret_access_key = self.get_secret(secret_name, "secret_access_key")
                 logger_obj.info(f"Loaded AWS Bedrock credentials from secret: {secret_name}")
+            elif self.llm_provider == 'local':
+                # For local LLMs, secret can contain 'url' and/or 'api_key'.
+                # If secret is JSON with keys, extract accordingly. If it's a plain string, treat as api_key.
+                raw = None
+                try:
+                    raw = self.get_secret(secret_name, key=None)
+                except Exception:
+                    raw = None
+
+                # get_secret returns string when key specified or SecretString; for LocalSecretsManager
+                # it may return dict when parsing JSON. Attempt to import manager directly for full data.
+                from backend.utils.secrets_manager import SecretsManager
+                manager = SecretsManager(
+                    use_aws=True,
+                    region=self.secrets_manager_region,
+                    access_key_id=self.aws_access_key_id,
+                    secret_access_key=self.aws_secret_access_key,
+                )
+
+                secret_obj = None
+                try:
+                    secret_obj = manager.get_secret(secret_name)
+                except Exception:
+                    secret_obj = None
+
+                # If we got a dict-like secret, set fields accordingly
+                if isinstance(secret_obj, dict):
+                    # set URL if present
+                    if 'url' in secret_obj and secret_obj.get('url'):
+                        self.local_llm_url = secret_obj.get('url')
+                        logger_obj.info(f"Loaded local LLM URL from secret: {secret_name}")
+                    # set API key if present
+                    if 'api_key' in secret_obj and secret_obj.get('api_key'):
+                        self.local_llm_api_key = secret_obj.get('api_key')
+                        logger_obj.info(f"Loaded local LLM API key from secret: {secret_name}")
+                else:
+                    # If secret is a plain string, treat as API key
+                    if isinstance(raw, str) and raw:
+                        self.local_llm_api_key = raw
+                        logger_obj.info(f"Loaded local LLM API key (string) from secret: {secret_name}")
+                    else:
+                        logger_obj.warning(f"Local secret '{secret_name}' had no usable fields (url/api_key)")
             else:
                 # For other providers, fetch API key
                 api_key = self.get_secret(secret_name, secret_key)

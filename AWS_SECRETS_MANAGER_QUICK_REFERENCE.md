@@ -106,6 +106,7 @@ api_key = manager.get_secret_value("dev_llm_openai")
 | `ANTHROPIC_SECRET_NAME` | - | Secret name for Anthropic |
 | `COHERE_SECRET_NAME` | - | Secret name for Cohere |
 | `AWS_BEDROCK_SECRET_NAME` | - | Secret name for AWS Bedrock |
+| `LOCAL_LLM_SECRET_NAME` | - | Secret name for local LLM (optional). Secret may contain `url` and/or `api_key` |
 
 ## Secret Name Conventions
 
