@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+langchain
+chromadb
+tiktoken
+streamlit
+httpx
+pydantic-settings
+sentence-transformers
+cryptography
+pytest
+pytest-asyncio
+pytest-cov
+pytest-mock

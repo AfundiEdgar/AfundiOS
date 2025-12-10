@@ -1,0 +1,21 @@
+# Docker ignore file for backend
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+.venv
+env/
+venv/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+*.md
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.agent/
+tests/
+test_*.py

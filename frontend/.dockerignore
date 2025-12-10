@@ -1,0 +1,19 @@
+# Docker ignore file for frontend
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+.env
+.venv
+env/
+venv/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+*.md
+.pytest_cache/
+.cache
+*.log
+tests/
+test_*.py
