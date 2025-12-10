@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 import os
+import logging
 
 
 class ConfigurationError(Exception):
@@ -24,16 +25,28 @@ class Settings(BaseSettings):
     environment: str = "local"
     
     # LLM Provider Configuration
-    llm_provider: str = "openai"  # Options: "openai", "anthropic", "cohere", "local"
+    llm_provider: str = "openai"  # Options: "openai", "anthropic", "cohere", "aws_bedrock", "local"
     llm_model: str = "gpt-4o-mini"  # Model name for the provider
     
     # API Keys
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     cohere_api_key: Optional[str] = None
+    aws_access_key_id: Optional[str] = None  # For AWS Bedrock
+    aws_secret_access_key: Optional[str] = None  # For AWS Bedrock
+    aws_region: str = "us-east-1"  # AWS region for Bedrock
     
     # Local LLM configuration (for self-hosted models)
     local_llm_url: Optional[str] = None  # e.g., "http://localhost:8000/v1" for Ollama
+    
+    # Secrets Manager Configuration
+    use_secrets_manager: bool = False  # Enable AWS Secrets Manager for credentials
+    secrets_manager_region: str = "us-east-1"  # AWS region for Secrets Manager
+    # Secret names for different credentials (e.g., "prod/llm/openai", "dev/aws/bedrock")
+    openai_secret_name: Optional[str] = None  # Secret name for OpenAI credentials
+    anthropic_secret_name: Optional[str] = None  # Secret name for Anthropic credentials
+    cohere_secret_name: Optional[str] = None  # Secret name for Cohere credentials
+    aws_bedrock_secret_name: Optional[str] = None  # Secret name for AWS Bedrock credentials
     
     # LLM Parameters
     llm_temperature: float = 0.0
@@ -89,7 +102,7 @@ class Settings(BaseSettings):
     @validator('llm_provider')
     def validate_llm_provider(cls, v: str) -> str:
         """Validate LLM provider is supported."""
-        valid_providers = {'openai', 'anthropic', 'cohere', 'local'}
+        valid_providers = {'openai', 'anthropic', 'cohere', 'aws_bedrock', 'local'}
         if v not in valid_providers:
             raise ValueError(
                 f"Invalid LLM provider '{v}'. "
@@ -194,6 +207,24 @@ class Settings(BaseSettings):
                 "Get your key at: https://dashboard.cohere.ai/api-keys"
             )
         
+        if provider == 'aws_bedrock':
+            if not values.get('aws_access_key_id'):
+                raise ValueError(
+                    "LLM provider is 'aws_bedrock' but AWS_ACCESS_KEY_ID is not set. "
+                    "Set it via:\n"
+                    "  1. Environment variable: export AWS_ACCESS_KEY_ID='...'\n"
+                    "  2. .env file: AWS_ACCESS_KEY_ID=...\n"
+                    "Get your credentials at: https://console.aws.amazon.com/iam/"
+                )
+            if not values.get('aws_secret_access_key'):
+                raise ValueError(
+                    "LLM provider is 'aws_bedrock' but AWS_SECRET_ACCESS_KEY is not set. "
+                    "Set it via:\n"
+                    "  1. Environment variable: export AWS_SECRET_ACCESS_KEY='...'\n"
+                    "  2. .env file: AWS_SECRET_ACCESS_KEY=...\n"
+                    "Get your credentials at: https://console.aws.amazon.com/iam/"
+                )
+        
         if provider == 'local' and not values.get('local_llm_url'):
             raise ValueError(
                 "LLM provider is 'local' but LOCAL_LLM_URL is not set. "
@@ -285,6 +316,108 @@ class Settings(BaseSettings):
                 if config_dict[key]:
                     config_dict[key] = f"***{config_dict[key][-4:]}" if len(str(config_dict[key])) > 4 else "***"
         return config_dict
+    
+    def get_secret(self, secret_name: str, key: Optional[str] = None) -> Optional[str]:
+        """
+        Fetch a secret from AWS Secrets Manager or environment variables.
+        
+        Args:
+            secret_name: Name of the secret to retrieve
+            key: Optional key to extract from JSON secret
+            
+        Returns:
+            Secret value as string, or None if not found
+            
+        Example:
+            # Fetch entire secret (if JSON, returns JSON string)
+            secret = settings.get_secret("prod/llm/openai")
+            
+            # Fetch specific key from JSON secret
+            api_key = settings.get_secret("prod/llm/openai", key="api_key")
+        """
+        if not self.use_secrets_manager:
+            logger_obj = logging.getLogger(__name__)
+            logger_obj.warning(
+                "Secrets Manager is disabled. Set USE_SECRETS_MANAGER=true to enable."
+            )
+            return None
+        
+        try:
+            from backend.utils.secrets_manager import SecretsManager
+            
+            manager = SecretsManager(
+                use_aws=True,
+                region=self.secrets_manager_region,
+                access_key_id=self.aws_access_key_id,
+                secret_access_key=self.aws_secret_access_key,
+            )
+            
+            return manager.get_secret_value(secret_name, key)
+        except Exception as e:
+            logger_obj = logging.getLogger(__name__)
+            logger_obj.error(f"Failed to retrieve secret '{secret_name}': {str(e)}")
+            return None
+    
+    def load_secrets_for_provider(self) -> None:
+        """
+        Load credentials from Secrets Manager for the configured LLM provider.
+        
+        This method fetches secrets from AWS Secrets Manager and updates the
+        corresponding API key fields. This is useful for production deployments
+        where credentials should not be stored in .env files.
+        
+        Usage:
+            settings = get_settings()
+            settings.load_secrets_for_provider()
+            # Now settings.openai_api_key, etc. are populated from Secrets Manager
+        """
+        if not self.use_secrets_manager:
+            return
+        
+        logger_obj = logging.getLogger(__name__)
+        logger_obj.info(
+            f"Loading credentials from Secrets Manager for '{self.llm_provider}' provider"
+        )
+        
+        # Map providers to their secret names and fields
+        provider_secrets = {
+            'openai': ('openai_secret_name', 'openai_api_key', 'api_key'),
+            'anthropic': ('anthropic_secret_name', 'anthropic_api_key', 'api_key'),
+            'cohere': ('cohere_secret_name', 'cohere_api_key', 'api_key'),
+            'aws_bedrock': ('aws_bedrock_secret_name', None, None),
+        }
+        
+        if self.llm_provider not in provider_secrets:
+            return
+        
+        secret_name_attr, field_name, secret_key = provider_secrets[self.llm_provider]
+        secret_name = getattr(self, secret_name_attr)
+        
+        if not secret_name:
+            logger_obj.warning(
+                f"No secret name configured for '{self.llm_provider}'. "
+                f"Set {secret_name_attr.upper()} environment variable."
+            )
+            return
+        
+        try:
+            if self.llm_provider == 'aws_bedrock':
+                # For AWS Bedrock, fetch access key and secret key
+                self.aws_access_key_id = self.get_secret(secret_name, "access_key_id")
+                self.aws_secret_access_key = self.get_secret(secret_name, "secret_access_key")
+                logger_obj.info(f"Loaded AWS Bedrock credentials from secret: {secret_name}")
+            else:
+                # For other providers, fetch API key
+                api_key = self.get_secret(secret_name, secret_key)
+                if api_key:
+                    setattr(self, field_name, api_key)
+                    logger_obj.info(
+                        f"Loaded {self.llm_provider} API key from secret: {secret_name}"
+                    )
+        except Exception as e:
+            logger_obj.error(
+                f"Failed to load secrets for '{self.llm_provider}': {str(e)}"
+            )
 
 
 @lru_cache(maxsize=1)

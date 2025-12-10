@@ -15,6 +15,7 @@ from .providers import (
     CohereProvider,
     LocalProvider,
 )
+from .aws_bedrock_llm import AWSBedrockLLM
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,31 @@ class ProviderFactory:
                 raise ValueError("Cohere API key not found in config or environment")
             return CohereProvider(
                 api_key=api_key,
+                model=model,
+                temperature=kwargs.get("temperature", 0.0),
+                max_tokens=kwargs.get("max_tokens", 512),
+            )
+
+        elif provider_name.lower() == "aws_bedrock":
+            access_key = kwargs.get("access_key_id") or os.getenv("AWS_ACCESS_KEY_ID") or settings.aws_access_key_id
+            secret_key = kwargs.get("secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY") or settings.aws_secret_access_key
+            region = kwargs.get("region") or os.getenv("AWS_REGION") or settings.aws_region
+            
+            if not access_key:
+                raise ValueError("AWS_ACCESS_KEY_ID not found in config or environment")
+            if not secret_key:
+                raise ValueError("AWS_SECRET_ACCESS_KEY not found in config or environment")
+            
+            bedrock_client = AWSBedrockLLM(
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+                region=region,
+                model=model,
+            )
+            
+            # Wrap in AWSBedrockProvider adapter
+            return AWSBedrockProvider(
+                bedrock_client=bedrock_client,
                 model=model,
                 temperature=kwargs.get("temperature", 0.0),
                 max_tokens=kwargs.get("max_tokens", 512),

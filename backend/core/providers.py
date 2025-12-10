@@ -4,7 +4,8 @@ LLM Provider Abstraction
 Supports multiple LLM providers with a unified interface:
 - OpenAI (GPT-4, GPT-3.5)
 - Anthropic (Claude)
-- Azure OpenAI
+- Cohere
+- AWS Bedrock (Nova Lite, Nova Pro, Claude via Bedrock)
 - Local/Self-hosted (via API compatibility)
 """
 
@@ -265,3 +266,70 @@ class LocalProvider(LLMProvider):
         )))
 
         return self.generate(messages)
+
+
+class AWSBedrockProvider(LLMProvider):
+    """AWS Bedrock provider supporting Nova and Claude models."""
+
+    def __init__(self, bedrock_client, model: str = "amazon.nova-lite-v1:0", **kwargs):
+        """
+        Initialize AWS Bedrock provider.
+        
+        Args:
+            bedrock_client: Instance of AWSBedrockLLM
+            model: Model ID (e.g., amazon.nova-lite-v1:0)
+            **kwargs: Additional arguments (temperature, max_tokens)
+        """
+        super().__init__(model, **kwargs)
+        self.bedrock_client = bedrock_client
+
+    def generate(self, messages: List[Message]) -> str:
+        """Generate response using AWS Bedrock."""
+        try:
+            # Convert messages to prompt format
+            prompt = self._format_messages_as_prompt(messages)
+            response = self.bedrock_client.generate(
+                prompt=prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            return response
+        except Exception as e:
+            logger.error(f"AWS Bedrock generation error: {e}")
+            raise
+
+    def chat(self, query: str, context: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
+        """Chat with context and history using AWS Bedrock."""
+        messages = [
+            Message("system", (
+                "You are a helpful assistant that answers questions using provided context. "
+                "Cite the context ids when referring to facts. Keep answers concise and accurate."
+            )),
+        ]
+
+        if history:
+            for user_msg, assistant_msg in history:
+                messages.append(Message("user", user_msg))
+                messages.append(Message("assistant", assistant_msg))
+
+        messages.append(Message("user", (
+            f"Context (each item has an id and source):\n{context}\n\n"
+            f"Question: {query}"
+        )))
+
+        return self.generate(messages)
+
+    def _format_messages_as_prompt(self, messages: List[Message]) -> str:
+        """Convert message list to prompt string for Bedrock."""
+        prompt_parts = []
+        for msg in messages:
+            if msg.role == "system":
+                prompt_parts.append(f"System: {msg.content}")
+            elif msg.role == "user":
+                prompt_parts.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                prompt_parts.append(f"Assistant: {msg.content}")
+        
+        prompt_parts.append("Assistant:")
+        return "\n\n".join(prompt_parts)
+
