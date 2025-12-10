@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software in your own work or research, please cite it using the following metadata."
+title: "AfundiOS"
+abstract: "A local-first, production-oriented RAG engine featuring hybrid retrieval, cross-encoder reranking, and citation tracking."
+authors:
+  - family-names: "Afundi" # Update this if your last name is different
+    given-names: "Edgar"   # Update this if your first name is different
+    # orid: "https://orcid.org/0000-0000-0000-0000" # Optional: Add if you have one
+repository-code: "https://github.com/AfundiEdgar/AfundiOS"
+keywords:
+  - "RAG"
+  - "Local AI"
+  - "Knowledge Base"
+  - "Information Retrieval"
+  - "Python"
+license: "MIT" # Double check your LICENSE file matches this
+version: "0.1.0"
+date-released: 2025-12-10
