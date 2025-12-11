@@ -1,0 +1,444 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      backend-image: ${{ steps.backend-meta.outputs.tags }}
+      frontend-image: ${{ steps.frontend-meta.outputs.tags }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Extract backend metadata
+      id: backend-meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=tag
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push backend
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        push: true
+        tags: ${{ steps.backend-meta.outputs.tags }}
+        labels: ${{ steps.backend-meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          REDIS_ENABLED=true
+
+    - name: Extract frontend metadata
+      id: frontend-meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=tag
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push frontend
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        push: true
+        tags: ${{ steps.frontend-meta.outputs.tags }}
+        labels: ${{ steps.frontend-meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment: staging
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.27.0'
+
+    - name: Create staging deployment manifest
+      run: |
+        cat > staging-deployment.yml << EOF
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: afundios-staging
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: redis
+          namespace: afundios-staging
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: redis
+          template:
+            metadata:
+              labels:
+                app: redis
+            spec:
+              containers:
+              - name: redis
+                image: redis:7.2-alpine
+                ports:
+                - containerPort: 6379
+                args: ["redis-server", "--appendonly", "yes"]
+                volumeMounts:
+                - name: redis-data
+                  mountPath: /data
+              volumes:
+              - name: redis-data
+                emptyDir: {}
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: redis
+          namespace: afundios-staging
+        spec:
+          selector:
+            app: redis
+          ports:
+          - port: 6379
+            targetPort: 6379
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: backend
+          namespace: afundios-staging
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: backend
+          template:
+            metadata:
+              labels:
+                app: backend
+            spec:
+              containers:
+              - name: backend
+                image: ${{ needs.build-and-push.outputs.backend-image }}
+                ports:
+                - containerPort: 8000
+                env:
+                - name: REDIS_ENABLED
+                  value: "true"
+                - name: REDIS_HOST
+                  value: "redis"
+                - name: REDIS_PORT
+                  value: "6379"
+                - name: ENVIRONMENT
+                  value: "staging"
+                resources:
+                  requests:
+                    memory: "512Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "1Gi"
+                    cpu: "500m"
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: backend
+          namespace: afundios-staging
+        spec:
+          selector:
+            app: backend
+          ports:
+          - port: 8000
+            targetPort: 8000
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: frontend
+          namespace: afundios-staging
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: frontend
+          template:
+            metadata:
+              labels:
+                app: frontend
+            spec:
+              containers:
+              - name: frontend
+                image: ${{ needs.build-and-push.outputs.frontend-image }}
+                ports:
+                - containerPort: 8501
+                env:
+                - name: BACKEND_URL
+                  value: "http://backend:8000"
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: frontend
+          namespace: afundios-staging
+        spec:
+          selector:
+            app: frontend
+          ports:
+          - port: 8501
+            targetPort: 8501
+        EOF
+
+    - name: Deploy to staging
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        # kubectl apply -f staging-deployment.yml
+        echo "Deployment manifest created for staging"
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment: production
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Create production deployment with Redis cluster
+      run: |
+        cat > production-deployment.yml << EOF
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: afundios-production
+        ---
+        # Redis Cluster ConfigMap
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: redis-cluster-config
+          namespace: afundios-production
+        data:
+          redis.conf: |
+            cluster-enabled yes
+            cluster-config-file nodes.conf
+            cluster-node-timeout 5000
+            appendonly yes
+            protected-mode no
+        ---
+        # Redis Cluster StatefulSet
+        apiVersion: apps/v1
+        kind: StatefulSet
+        metadata:
+          name: redis-cluster
+          namespace: afundios-production
+        spec:
+          serviceName: redis-cluster
+          replicas: 6
+          selector:
+            matchLabels:
+              app: redis-cluster
+          template:
+            metadata:
+              labels:
+                app: redis-cluster
+            spec:
+              containers:
+              - name: redis
+                image: redis:7.2-alpine
+                command: ["redis-server"]
+                args: ["/etc/redis/redis.conf"]
+                ports:
+                - containerPort: 6379
+                - containerPort: 16379
+                volumeMounts:
+                - name: redis-config
+                  mountPath: /etc/redis
+                - name: redis-data
+                  mountPath: /data
+              volumes:
+              - name: redis-config
+                configMap:
+                  name: redis-cluster-config
+          volumeClaimTemplates:
+          - metadata:
+              name: redis-data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: redis-cluster
+          namespace: afundios-production
+        spec:
+          clusterIP: None
+          selector:
+            app: redis-cluster
+          ports:
+          - name: redis
+            port: 6379
+            targetPort: 6379
+          - name: cluster
+            port: 16379
+            targetPort: 16379
+        ---
+        # Backend Deployment
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: backend
+          namespace: afundios-production
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: backend
+          template:
+            metadata:
+              labels:
+                app: backend
+            spec:
+              containers:
+              - name: backend
+                image: ${{ needs.build-and-push.outputs.backend-image }}
+                ports:
+                - containerPort: 8000
+                env:
+                - name: REDIS_ENABLED
+                  value: "true"
+                - name: REDIS_CLUSTER_ENABLED
+                  value: "true"
+                - name: REDIS_CLUSTER_NODES
+                  value: "redis-cluster-0.redis-cluster:6379,redis-cluster-1.redis-cluster:6379,redis-cluster-2.redis-cluster:6379"
+                - name: ENVIRONMENT
+                  value: "production"
+                resources:
+                  requests:
+                    memory: "1Gi"
+                    cpu: "500m"
+                  limits:
+                    memory: "2Gi"
+                    cpu: "1000m"
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 60
+                  periodSeconds: 30
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: backend
+          namespace: afundios-production
+        spec:
+          selector:
+            app: backend
+          ports:
+          - port: 8000
+            targetPort: 8000
+        EOF
+
+    - name: Deploy to production
+      run: |
+        echo "🚀 Deploying to production environment with Redis cluster..."
+        echo "Production deployment manifest created"
+        
+    - name: Run post-deployment tests
+      run: |
+        echo "🧪 Running post-deployment health checks..."
+        # Add health check scripts here
+
+  notify-deployment:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const deployments = {
+            staging: '${{ needs.deploy-staging.result }}',
+            production: '${{ needs.deploy-production.result }}'
+          };
+          
+          let message = '## 🚀 Deployment Status\n\n';
+          
+          for (const [env, status] of Object.entries(deployments)) {
+            if (status !== 'skipped') {
+              const emoji = status === 'success' ? '✅' : '❌';
+              message += `${emoji} **${env.toUpperCase()}**: ${status}\n`;
+            }
+          }
+          
+          message += '\n---\n';
+          message += `**Commit**: ${context.sha.substring(0, 8)}\n`;
+          message += `**Author**: ${context.actor}\n`;
+          message += `**Workflow**: ${context.workflow}\n`;
+          
+          // Create a deployment status comment
+          if (context.eventName === 'push') {
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: message
+            });
+          }

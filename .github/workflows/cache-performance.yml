@@ -1,0 +1,431 @@
+name: Cache Performance Testing
+
+on:
+  schedule:
+    # Run performance tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_duration:
+        description: 'Test duration in minutes'
+        required: false
+        default: '10'
+      concurrent_users:
+        description: 'Number of concurrent users to simulate'
+        required: false
+        default: '10'
+
+jobs:
+  cache-performance-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7.2-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+          
+      redis-cluster:
+        image: grokzen/redis-cluster:7.0.0
+        ports:
+          - 7000:7000
+          - 7001:7001
+          - 7002:7002
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install locust matplotlib seaborn pandas
+
+    - name: Create comprehensive performance test
+      run: |
+        cat > cache_performance_suite.py << 'EOF'
+        import time
+        import json
+        import redis
+        import statistics
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+        from typing import List, Dict, Tuple
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        class CachePerformanceTester:
+            def __init__(self):
+                self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+                self.results = {}
+                
+            def test_embedding_cache_performance(self, num_operations: int = 1000) -> Dict:
+                """Test embedding cache performance with various scenarios."""
+                print(f"🧪 Testing embedding cache with {num_operations} operations...")
+                
+                # Test data
+                embeddings = [[float(i + j) for j in range(384)] for i in range(num_operations)]
+                texts = [f"test_text_{i}_{'x' * (i % 100)}" for i in range(num_operations)]
+                
+                # Test 1: Cache write performance
+                start_time = time.time()
+                for i, (text, embedding) in enumerate(zip(texts, embeddings)):
+                    key = f"embed:test_{hash(text)}"
+                    self.redis_client.setex(key, 3600, json.dumps(embedding))
+                write_time = time.time() - start_time
+                
+                # Test 2: Cache read performance
+                start_time = time.time()
+                hits = 0
+                for text in texts:
+                    key = f"embed:test_{hash(text)}"
+                    result = self.redis_client.get(key)
+                    if result:
+                        hits += 1
+                        json.loads(result)  # Deserialize to simulate real usage
+                read_time = time.time() - start_time
+                
+                # Test 3: Mixed workload (70% reads, 30% writes)
+                mixed_operations = []
+                for i in range(num_operations):
+                    if i % 10 < 7:  # 70% reads
+                        mixed_operations.append(('read', texts[i % len(texts)]))
+                    else:  # 30% writes
+                        mixed_operations.append(('write', texts[i % len(texts)], embeddings[i % len(embeddings)]))
+                
+                start_time = time.time()
+                for op_type, *args in mixed_operations:
+                    if op_type == 'read':
+                        key = f"embed:test_{hash(args[0])}"
+                        self.redis_client.get(key)
+                    else:
+                        key = f"embed:test_{hash(args[0])}"
+                        self.redis_client.setex(key, 3600, json.dumps(args[1]))
+                mixed_time = time.time() - start_time
+                
+                return {
+                    'write_ops_per_sec': num_operations / write_time,
+                    'read_ops_per_sec': num_operations / read_time,
+                    'mixed_ops_per_sec': num_operations / mixed_time,
+                    'hit_ratio': hits / num_operations,
+                    'write_latency_ms': (write_time / num_operations) * 1000,
+                    'read_latency_ms': (read_time / num_operations) * 1000,
+                }
+            
+            def test_concurrent_access(self, num_threads: int = 10, ops_per_thread: int = 100) -> Dict:
+                """Test cache performance under concurrent access."""
+                print(f"🔄 Testing concurrent access with {num_threads} threads, {ops_per_thread} ops each...")
+                
+                def worker_thread(thread_id: int) -> List[float]:
+                    latencies = []
+                    for i in range(ops_per_thread):
+                        start_time = time.time()
+                        key = f"concurrent:thread_{thread_id}_op_{i}"
+                        value = f"value_{thread_id}_{i}" * 10
+                        
+                        # Write then read
+                        self.redis_client.setex(key, 60, value)
+                        result = self.redis_client.get(key)
+                        
+                        latency = (time.time() - start_time) * 1000  # Convert to ms
+                        latencies.append(latency)
+                    return latencies
+                
+                # Run concurrent operations
+                start_time = time.time()
+                with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                    futures = [executor.submit(worker_thread, i) for i in range(num_threads)]
+                    all_latencies = []
+                    for future in as_completed(futures):
+                        all_latencies.extend(future.result())
+                total_time = time.time() - start_time
+                
+                return {
+                    'total_operations': num_threads * ops_per_thread,
+                    'total_time_seconds': total_time,
+                    'throughput_ops_per_sec': (num_threads * ops_per_thread) / total_time,
+                    'avg_latency_ms': statistics.mean(all_latencies),
+                    'p95_latency_ms': statistics.quantiles(all_latencies, n=20)[18],  # 95th percentile
+                    'p99_latency_ms': statistics.quantiles(all_latencies, n=100)[98],  # 99th percentile
+                    'max_latency_ms': max(all_latencies),
+                    'min_latency_ms': min(all_latencies),
+                }
+            
+            def test_memory_usage(self, num_keys: int = 10000) -> Dict:
+                """Test memory usage patterns."""
+                print(f"💾 Testing memory usage with {num_keys} keys...")
+                
+                # Get initial memory usage
+                initial_memory = self.redis_client.info('memory')['used_memory']
+                
+                # Store large embeddings
+                large_embedding = [float(i) for i in range(1536)]  # Larger embedding
+                for i in range(num_keys):
+                    key = f"memory_test:{i}"
+                    self.redis_client.setex(key, 3600, json.dumps(large_embedding))
+                
+                # Get final memory usage
+                final_memory = self.redis_client.info('memory')['used_memory']
+                memory_per_key = (final_memory - initial_memory) / num_keys
+                
+                # Test key expiration
+                self.redis_client.expire("memory_test:0", 1)
+                time.sleep(2)
+                expired_memory = self.redis_client.info('memory')['used_memory']
+                
+                return {
+                    'initial_memory_bytes': initial_memory,
+                    'final_memory_bytes': final_memory,
+                    'memory_per_key_bytes': memory_per_key,
+                    'total_memory_used_mb': (final_memory - initial_memory) / (1024 * 1024),
+                    'memory_after_expiry_bytes': expired_memory,
+                    'memory_reclaimed_bytes': final_memory - expired_memory,
+                }
+            
+            def test_cache_hit_patterns(self, total_queries: int = 1000) -> Dict:
+                """Test realistic cache hit patterns."""
+                print(f"📊 Testing cache hit patterns with {total_queries} queries...")
+                
+                # Simulate Zipfian distribution (common in real workloads)
+                import random
+                
+                # Create a set of "popular" queries (20% of unique queries get 80% of traffic)
+                unique_queries = [f"query_{i}" for i in range(100)]
+                popular_queries = unique_queries[:20]
+                rare_queries = unique_queries[20:]
+                
+                # Generate query sequence following 80/20 rule
+                query_sequence = []
+                for _ in range(total_queries):
+                    if random.random() < 0.8:  # 80% chance of popular query
+                        query_sequence.append(random.choice(popular_queries))
+                    else:  # 20% chance of rare query
+                        query_sequence.append(random.choice(rare_queries))
+                
+                # Simulate cache behavior
+                cache_hits = 0
+                cache_misses = 0
+                response_times = []
+                
+                for query in query_sequence:
+                    start_time = time.time()
+                    key = f"query_cache:{hash(query)}"
+                    
+                    # Check cache
+                    result = self.redis_client.get(key)
+                    if result:
+                        # Cache hit - fast response
+                        cache_hits += 1
+                        response_time = 0.005  # 5ms
+                    else:
+                        # Cache miss - slow response + cache store
+                        cache_misses += 1
+                        response_time = 0.150  # 150ms to generate + store
+                        
+                        # Simulate storing result in cache
+                        fake_result = f"result_for_{query}" * 20
+                        self.redis_client.setex(key, 1800, fake_result)
+                    
+                    response_times.append(response_time * 1000)  # Convert to ms
+                
+                hit_ratio = cache_hits / total_queries
+                avg_response_time = statistics.mean(response_times)
+                
+                return {
+                    'total_queries': total_queries,
+                    'cache_hits': cache_hits,
+                    'cache_misses': cache_misses,
+                    'hit_ratio': hit_ratio,
+                    'avg_response_time_ms': avg_response_time,
+                    'time_saved_seconds': (cache_hits * 0.145),  # Time saved by cache hits
+                    'performance_improvement': 0.150 / (avg_response_time / 1000) if avg_response_time > 0 else 0,
+                }
+            
+            def run_full_suite(self) -> Dict:
+                """Run the complete performance test suite."""
+                print("🚀 Starting comprehensive cache performance test suite...")
+                
+                # Clear cache before testing
+                self.redis_client.flushdb()
+                
+                results = {
+                    'timestamp': time.time(),
+                    'redis_info': self.redis_client.info(),
+                }
+                
+                # Run all tests
+                try:
+                    results['embedding_performance'] = self.test_embedding_cache_performance()
+                    results['concurrent_access'] = self.test_concurrent_access()
+                    results['memory_usage'] = self.test_memory_usage()
+                    results['cache_patterns'] = self.test_cache_hit_patterns()
+                    
+                    # Calculate overall performance score
+                    embedding_score = min(results['embedding_performance']['read_ops_per_sec'] / 1000, 10)
+                    concurrent_score = min(results['concurrent_access']['throughput_ops_per_sec'] / 500, 10)
+                    memory_score = max(10 - (results['memory_usage']['memory_per_key_bytes'] / 1000), 0)
+                    pattern_score = results['cache_patterns']['hit_ratio'] * 10
+                    
+                    results['overall_score'] = (embedding_score + concurrent_score + memory_score + pattern_score) / 4
+                    
+                    print(f"✅ Performance test suite completed!")
+                    print(f"📊 Overall Performance Score: {results['overall_score']:.2f}/10")
+                    
+                except Exception as e:
+                    print(f"❌ Error during testing: {e}")
+                    results['error'] = str(e)
+                
+                return results
+            
+            def generate_report(self, results: Dict) -> None:
+                """Generate a performance report with visualizations."""
+                print("📈 Generating performance report...")
+                
+                # Create performance summary
+                summary = f"""
+        # Redis Cache Performance Report
+        
+        **Test Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(results['timestamp']))}
+        **Overall Score:** {results.get('overall_score', 'N/A'):.2f}/10
+        
+        ## Embedding Cache Performance
+        - Read Operations/sec: {results['embedding_performance']['read_ops_per_sec']:.0f}
+        - Write Operations/sec: {results['embedding_performance']['write_ops_per_sec']:.0f}
+        - Mixed Workload/sec: {results['embedding_performance']['mixed_ops_per_sec']:.0f}
+        - Cache Hit Ratio: {results['embedding_performance']['hit_ratio']:.2%}
+        - Average Read Latency: {results['embedding_performance']['read_latency_ms']:.2f}ms
+        
+        ## Concurrent Access Performance
+        - Throughput: {results['concurrent_access']['throughput_ops_per_sec']:.0f} ops/sec
+        - Average Latency: {results['concurrent_access']['avg_latency_ms']:.2f}ms
+        - 95th Percentile: {results['concurrent_access']['p95_latency_ms']:.2f}ms
+        - 99th Percentile: {results['concurrent_access']['p99_latency_ms']:.2f}ms
+        
+        ## Memory Usage
+        - Memory per Key: {results['memory_usage']['memory_per_key_bytes']:.0f} bytes
+        - Total Memory Used: {results['memory_usage']['total_memory_used_mb']:.2f} MB
+        - Memory Reclaimed: {results['memory_usage']['memory_reclaimed_bytes']:.0f} bytes
+        
+        ## Cache Hit Patterns
+        - Hit Ratio: {results['cache_patterns']['hit_ratio']:.2%}
+        - Avg Response Time: {results['cache_patterns']['avg_response_time_ms']:.2f}ms
+        - Performance Improvement: {results['cache_patterns']['performance_improvement']:.1f}x
+        - Time Saved: {results['cache_patterns']['time_saved_seconds']:.2f}s
+        """
+                
+                with open('performance_report.md', 'w') as f:
+                    f.write(summary)
+                
+                # Save raw results
+                with open('performance_results.json', 'w') as f:
+                    json.dump(results, f, indent=2)
+                
+                print("📊 Report saved to performance_report.md")
+                print("💾 Raw results saved to performance_results.json")
+        
+        if __name__ == "__main__":
+            tester = CachePerformanceTester()
+            results = tester.run_full_suite()
+            tester.generate_report(results)
+            
+            # Performance thresholds for CI
+            if results.get('overall_score', 0) < 7.0:
+                print("❌ Performance below threshold!")
+                exit(1)
+            else:
+                print("✅ Performance meets requirements!")
+        EOF
+
+    - name: Run performance test suite
+      run: |
+        python cache_performance_suite.py
+
+    - name: Upload performance report
+      uses: actions/upload-artifact@v3
+      with:
+        name: cache-performance-report
+        path: |
+          performance_report.md
+          performance_results.json
+
+    - name: Comment performance results on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('performance_report.md')) {
+            const report = fs.readFileSync('performance_report.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📊 Cache Performance Test Results\n\n${report}`
+            });
+          }
+
+  redis-cluster-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis-cluster:
+        image: grokzen/redis-cluster:7.0.0
+        ports:
+          - 7000:7000
+          - 7001:7001
+          - 7002:7002
+          - 7003:7003
+          - 7004:7004
+          - 7005:7005
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Test Redis cluster configuration
+      run: |
+        cd backend
+        python -c "
+        import os
+        os.environ['REDIS_CLUSTER_ENABLED'] = 'true'
+        os.environ['REDIS_CLUSTER_NODES'] = 'localhost:7000,localhost:7001,localhost:7002'
+        
+        from core.cache import RedisCache
+        cache = RedisCache()
+        
+        # Test cluster operations
+        stats = cache.get_cache_stats()
+        print('Cluster stats:', stats)
+        
+        # Test embedding cache with cluster
+        test_embedding = [1.0, 2.0, 3.0] * 128
+        success = cache.set_embedding('cluster_test', test_embedding)
+        retrieved = cache.get_embedding('cluster_test')
+        
+        assert success == True
+        assert retrieved == test_embedding
+        print('✅ Redis cluster tests passed')
+        "

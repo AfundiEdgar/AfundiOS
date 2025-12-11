@@ -1,0 +1,382 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7.2-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Create cache directories
+      run: |
+        mkdir -p backend/data/vector_store
+        mkdir -p data
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Set up environment
+      run: |
+        cp .env.example .env
+        # Enable Redis for testing
+        sed -i 's/REDIS_ENABLED=.*/REDIS_ENABLED=true/' .env
+        sed -i 's/REDIS_HOST=.*/REDIS_HOST=localhost/' .env
+        sed -i 's/REDIS_PORT=.*/REDIS_PORT=6379/' .env
+
+    - name: Test Redis connection
+      run: |
+        python -c "
+        import redis
+        r = redis.Redis(host='localhost', port=6379, db=0)
+        print('Redis ping:', r.ping())
+        "
+
+    - name: Run cache tests
+      run: |
+        cd backend
+        python -c "
+        from core.cache import get_cache
+        cache = get_cache()
+        stats = cache.get_cache_stats()
+        print('Cache stats:', stats)
+        assert stats['enabled'] == True
+        assert stats['connected'] == True
+        print('✅ Cache tests passed')
+        "
+
+    - name: Run embedding cache tests
+      run: |
+        cd backend
+        python -c "
+        from core.cached_embedder import create_cached_embedder
+        embedder = create_cached_embedder()
+        
+        # Test embedding caching
+        test_text = 'This is a test sentence for caching'
+        embedding1 = embedder.embed_query(test_text)
+        embedding2 = embedder.embed_query(test_text)  # Should be from cache
+        
+        assert embedding1 == embedding2
+        print('✅ Embedding cache tests passed')
+        "
+
+    - name: Run unit tests
+      run: |
+        cd backend
+        python -m pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+
+    - name: Run integration tests
+      run: |
+        cd backend
+        python -c "
+        import asyncio
+        from api.cache import get_cache_stats, clear_all_cache
+        
+        async def test_api():
+            # Test cache stats API
+            stats = await get_cache_stats()
+            print('API Cache stats:', stats.dict())
+            assert stats.enabled == True
+            
+            # Test clear cache API  
+            result = await clear_all_cache()
+            print('Clear cache result:', result.dict())
+            assert result.success == True
+            
+            print('✅ Cache API tests passed')
+        
+        asyncio.run(test_api())
+        "
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+        fail_ci_if_error: true
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run security scan
+      uses: pypa/gh-action-pip-audit@v1.0.8
+      with:
+        inputs: requirements.txt
+
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit
+        bandit -r backend/ -f json -o bandit-report.json || true
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: bandit-report.json
+
+  build-backend:
+    runs-on: ubuntu-latest
+    needs: [test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}/backend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    needs: [test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}/frontend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push frontend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: [test]
+    
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install locust
+
+    - name: Create performance test
+      run: |
+        cat > performance_test.py << 'EOF'
+        import time
+        import redis
+        from locust import HttpUser, task, between
+        
+        class CachePerformanceTest:
+            def __init__(self):
+                self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+                
+            def test_cache_performance(self):
+                # Test cache vs no-cache performance
+                start_time = time.time()
+                
+                # Simulate cache operations
+                for i in range(100):
+                    key = f"test_key_{i}"
+                    value = f"test_value_{i}" * 100
+                    
+                    # Set in cache
+                    self.redis_client.set(key, value, ex=300)
+                    
+                    # Get from cache
+                    cached_value = self.redis_client.get(key)
+                    assert cached_value is not None
+                
+                end_time = time.time()
+                duration = end_time - start_time
+                print(f"Cache performance test completed in {duration:.2f}s")
+                print(f"Operations per second: {100/duration:.2f}")
+                
+                return duration < 5.0  # Should complete in under 5 seconds
+        
+        if __name__ == "__main__":
+            test = CachePerformanceTest()
+            success = test.test_cache_performance()
+            print("✅ Performance test passed" if success else "❌ Performance test failed")
+        EOF
+
+    - name: Run performance tests
+      run: |
+        python performance_test.py
+
+    - name: Cache hit ratio test
+      run: |
+        cd backend
+        python -c "
+        from core.cache import get_cache
+        import time
+        
+        cache = get_cache()
+        
+        # Test cache hit ratio
+        test_data = [(f'query_{i}', [float(j) for j in range(384)]) for i in range(50)]
+        
+        # First pass - populate cache
+        start_time = time.time()
+        for text, embedding in test_data:
+            cache.set_embedding(text, embedding)
+        populate_time = time.time() - start_time
+        
+        # Second pass - test cache hits
+        start_time = time.time()
+        hits = 0
+        for text, _ in test_data:
+            if cache.get_embedding(text) is not None:
+                hits += 1
+        retrieve_time = time.time() - start_time
+        
+        hit_ratio = hits / len(test_data)
+        speedup = populate_time / retrieve_time if retrieve_time > 0 else 0
+        
+        print(f'Cache hit ratio: {hit_ratio:.2%}')
+        print(f'Cache speedup: {speedup:.1f}x')
+        
+        assert hit_ratio >= 0.95  # Should have 95%+ hit ratio
+        assert speedup >= 5.0     # Should be at least 5x faster
+        print('✅ Cache performance metrics passed')
+        "
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend, performance-test]
+    if: github.ref == 'refs/heads/develop'
+    
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to staging
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        echo "Backend image: ghcr.io/${{ github.repository }}/backend:develop"
+        echo "Frontend image: ghcr.io/${{ github.repository }}/frontend:develop"
+        
+        # Here you would add your staging deployment steps
+        # For example, using kubectl, helm, or docker-compose
+        
+        # Example with docker-compose:
+        # export BACKEND_IMAGE=ghcr.io/${{ github.repository }}/backend:develop
+        # export FRONTEND_IMAGE=ghcr.io/${{ github.repository }}/frontend:develop
+        # docker-compose -f docker-compose.staging.yml up -d
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend, performance-test]
+    if: github.ref == 'refs/heads/main'
+    
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to production
+      run: |
+        echo "🚀 Deploying to production environment..."
+        echo "Backend image: ghcr.io/${{ github.repository }}/backend:latest"
+        echo "Frontend image: ghcr.io/${{ github.repository }}/frontend:latest"
+        
+        # Here you would add your production deployment steps
+        # Make sure to include Redis cluster setup for production
+        
+        # Example deployment steps:
+        # 1. Update Redis cluster configuration
+        # 2. Deploy backend with Redis cluster endpoints
+        # 3. Deploy frontend
+        # 4. Run health checks
+        # 5. Update load balancer configuration

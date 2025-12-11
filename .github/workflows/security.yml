@@ -1,0 +1,539 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run security scans daily at 3 AM UTC
+    - cron: '0 3 * * *'
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit semgrep
+
+    - name: Run Safety check
+      run: |
+        safety check --json --output safety-report.json || true
+
+    - name: Run pip-audit
+      uses: pypa/gh-action-pip-audit@v1.0.8
+      with:
+        inputs: requirements.txt
+        format: json
+        output: pip-audit-report.json
+      continue-on-error: true
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-security-reports
+        path: |
+          safety-report.json
+          pip-audit-report.json
+
+  code-security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Bandit
+      run: pip install bandit[toml]
+
+    - name: Run Bandit security scan
+      run: |
+        bandit -r backend/ -f json -o bandit-report.json --severity-level medium || true
+
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/python
+          p/django
+        generateSarif: "1"
+      continue-on-error: true
+
+    - name: Upload code security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-security-reports
+        path: |
+          bandit-report.json
+          semgrep.sarif
+
+    - name: Upload SARIF to GitHub Security
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep.sarif
+
+  redis-security-scan:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install redis nmap-python
+
+    - name: Redis security assessment
+      run: |
+        cat > redis_security_scan.py << 'EOF'
+        import redis
+        import socket
+        import json
+        import time
+        from typing import Dict, List
+
+        class RedisSecurityScanner:
+            def __init__(self, host='localhost', port=6379):
+                self.host = host
+                self.port = port
+                self.results = {}
+            
+            def test_authentication(self) -> Dict:
+                """Test Redis authentication security."""
+                print("🔐 Testing Redis authentication...")
+                
+                # Test unauthenticated access
+                try:
+                    client = redis.Redis(host=self.host, port=self.port, socket_connect_timeout=5)
+                    client.ping()
+                    auth_required = False
+                except redis.AuthenticationError:
+                    auth_required = True
+                except Exception as e:
+                    return {"error": str(e)}
+                
+                # Test weak passwords if auth is enabled
+                weak_passwords = ['', 'password', '123456', 'admin', 'redis', 'test']
+                vulnerable_to_weak_passwords = []
+                
+                if auth_required:
+                    for pwd in weak_passwords:
+                        try:
+                            client = redis.Redis(host=self.host, port=self.port, password=pwd, socket_connect_timeout=5)
+                            client.ping()
+                            vulnerable_to_weak_passwords.append(pwd)
+                        except:
+                            continue
+                
+                return {
+                    "authentication_required": auth_required,
+                    "vulnerable_to_weak_passwords": vulnerable_to_weak_passwords,
+                    "security_level": "HIGH" if auth_required and not vulnerable_to_weak_passwords else "LOW"
+                }
+            
+            def test_dangerous_commands(self) -> Dict:
+                """Test if dangerous Redis commands are disabled."""
+                print("⚠️  Testing dangerous command access...")
+                
+                try:
+                    client = redis.Redis(host=self.host, port=self.port, socket_connect_timeout=5)
+                    
+                    dangerous_commands = {
+                        'FLUSHALL': 'flushall',
+                        'FLUSHDB': 'flushdb', 
+                        'CONFIG': 'config get *',
+                        'EVAL': 'eval "return 1" 0',
+                        'DEBUG': 'debug object key',
+                        'SHUTDOWN': 'shutdown nosave'
+                    }
+                    
+                    accessible_dangerous_commands = []
+                    
+                    for cmd_name, cmd in dangerous_commands.items():
+                        try:
+                            if cmd_name == 'SHUTDOWN':
+                                # Don't actually run shutdown
+                                continue
+                            client.execute_command(*cmd.split())
+                            accessible_dangerous_commands.append(cmd_name)
+                        except redis.ResponseError as e:
+                            if "unknown command" in str(e).lower():
+                                # Command is disabled - good
+                                continue
+                            else:
+                                # Command exists but may have failed for other reasons
+                                accessible_dangerous_commands.append(cmd_name)
+                        except Exception:
+                            continue
+                    
+                    return {
+                        "accessible_dangerous_commands": accessible_dangerous_commands,
+                        "security_level": "HIGH" if not accessible_dangerous_commands else "MEDIUM"
+                    }
+                    
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            def test_network_security(self) -> Dict:
+                """Test Redis network security configuration."""
+                print("🌐 Testing network security...")
+                
+                try:
+                    client = redis.Redis(host=self.host, port=self.port, socket_connect_timeout=5)
+                    info = client.info()
+                    
+                    # Check bind configuration
+                    bind_addresses = []
+                    if 'tcp_port' in info:
+                        # Redis is listening on TCP
+                        bind_addresses.append(f"TCP:{info['tcp_port']}")
+                    
+                    # Test if Redis responds to external connections
+                    external_accessible = True
+                    try:
+                        external_client = redis.Redis(host=self.host, port=self.port, socket_connect_timeout=2)
+                        external_client.ping()
+                    except:
+                        external_accessible = False
+                    
+                    return {
+                        "bind_addresses": bind_addresses,
+                        "external_accessible": external_accessible,
+                        "protected_mode": info.get('tcp_port', 0) != 0,
+                        "security_level": "MEDIUM" if not external_accessible else "LOW"
+                    }
+                    
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            def test_data_exposure(self) -> Dict:
+                """Test for potential data exposure risks."""
+                print("🔍 Testing data exposure risks...")
+                
+                try:
+                    client = redis.Redis(host=self.host, port=self.port, socket_connect_timeout=5)
+                    
+                    # Test if we can access existing keys
+                    keys = client.keys("*")
+                    
+                    # Check for sensitive data patterns
+                    sensitive_patterns = ['password', 'secret', 'token', 'key', 'auth', 'credential']
+                    potentially_sensitive_keys = []
+                    
+                    for key in keys[:100]:  # Check first 100 keys
+                        key_str = key.decode() if isinstance(key, bytes) else str(key)
+                        if any(pattern in key_str.lower() for pattern in sensitive_patterns):
+                            potentially_sensitive_keys.append(key_str)
+                    
+                    # Test if we can read random keys
+                    readable_keys = 0
+                    for key in keys[:10]:  # Test first 10 keys
+                        try:
+                            client.get(key)
+                            readable_keys += 1
+                        except:
+                            continue
+                    
+                    return {
+                        "total_keys": len(keys),
+                        "potentially_sensitive_keys": potentially_sensitive_keys,
+                        "readable_keys_count": readable_keys,
+                        "security_level": "HIGH" if not potentially_sensitive_keys else "MEDIUM"
+                    }
+                    
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            def run_full_scan(self) -> Dict:
+                """Run complete Redis security assessment."""
+                print("🛡️  Starting Redis security assessment...")
+                
+                self.results = {
+                    "timestamp": time.time(),
+                    "target": f"{self.host}:{self.port}",
+                    "scans": {}
+                }
+                
+                # Run all security tests
+                self.results["scans"]["authentication"] = self.test_authentication()
+                self.results["scans"]["dangerous_commands"] = self.test_dangerous_commands()
+                self.results["scans"]["network_security"] = self.test_network_security()
+                self.results["scans"]["data_exposure"] = self.test_data_exposure()
+                
+                # Calculate overall security score
+                security_levels = []
+                for scan_name, scan_result in self.results["scans"].items():
+                    if "security_level" in scan_result:
+                        level = scan_result["security_level"]
+                        if level == "HIGH":
+                            security_levels.append(3)
+                        elif level == "MEDIUM":
+                            security_levels.append(2)
+                        else:
+                            security_levels.append(1)
+                
+                if security_levels:
+                    avg_score = sum(security_levels) / len(security_levels)
+                    if avg_score >= 2.5:
+                        overall_security = "HIGH"
+                    elif avg_score >= 1.5:
+                        overall_security = "MEDIUM"
+                    else:
+                        overall_security = "LOW"
+                else:
+                    overall_security = "UNKNOWN"
+                
+                self.results["overall_security_level"] = overall_security
+                
+                # Generate recommendations
+                recommendations = []
+                
+                auth_scan = self.results["scans"]["authentication"]
+                if not auth_scan.get("authentication_required", False):
+                    recommendations.append("Enable Redis authentication with requirepass directive")
+                
+                if auth_scan.get("vulnerable_to_weak_passwords", []):
+                    recommendations.append("Use strong, unique passwords for Redis authentication")
+                
+                cmd_scan = self.results["scans"]["dangerous_commands"]
+                if cmd_scan.get("accessible_dangerous_commands", []):
+                    recommendations.append("Disable dangerous commands like FLUSHALL, CONFIG, EVAL")
+                
+                net_scan = self.results["scans"]["network_security"]
+                if net_scan.get("external_accessible", False):
+                    recommendations.append("Restrict Redis access to localhost or private networks")
+                
+                data_scan = self.results["scans"]["data_exposure"]
+                if data_scan.get("potentially_sensitive_keys", []):
+                    recommendations.append("Review key naming patterns to avoid exposing sensitive data")
+                
+                self.results["recommendations"] = recommendations
+                
+                print(f"✅ Security scan completed. Overall level: {overall_security}")
+                return self.results
+
+        if __name__ == "__main__":
+            scanner = RedisSecurityScanner()
+            results = scanner.run_full_scan()
+            
+            # Save results
+            with open('redis-security-report.json', 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            # Print summary
+            print(f"\n📊 Redis Security Assessment Results:")
+            print(f"Overall Security Level: {results['overall_security_level']}")
+            
+            if results.get('recommendations'):
+                print(f"\n📋 Security Recommendations:")
+                for i, rec in enumerate(results['recommendations'], 1):
+                    print(f"{i}. {rec}")
+            
+            # Fail CI if security is too low
+            if results['overall_security_level'] == 'LOW':
+                print("❌ Redis security level is too low for production!")
+                exit(1)
+            else:
+                print("✅ Redis security assessment passed")
+        EOF
+        
+        python redis_security_scan.py
+
+    - name: Upload Redis security report
+      uses: actions/upload-artifact@v3
+      with:
+        name: redis-security-report
+        path: redis-security-report.json
+
+  docker-security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build backend image for scanning
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        load: true
+        tags: afundios-backend:security-scan
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner on backend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: afundios-backend:security-scan
+        format: 'sarif'
+        output: 'backend-trivy-results.sarif'
+
+    - name: Build frontend image for scanning
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        load: true
+        tags: afundios-frontend:security-scan
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner on frontend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: afundios-frontend:security-scan
+        format: 'sarif'
+        output: 'frontend-trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: |
+          backend-trivy-results.sarif
+          frontend-trivy-results.sarif
+
+    - name: Upload Docker security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker-security-reports
+        path: |
+          backend-trivy-results.sarif
+          frontend-trivy-results.sarif
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run GitLeaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Run TruffleHog OSS
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, code-security-scan, redis-security-scan, docker-security-scan, secrets-scan]
+    if: always()
+    
+    steps:
+    - name: Download all security reports
+      uses: actions/download-artifact@v3
+      with:
+        path: security-reports
+
+    - name: Generate security summary
+      run: |
+        echo "# 🛡️ Security Scan Summary" > security-summary.md
+        echo "" >> security-summary.md
+        echo "**Scan Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> security-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        echo "## Scan Results" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        # Check each job result
+        jobs=("dependency-scan" "code-security-scan" "redis-security-scan" "docker-security-scan" "secrets-scan")
+        results=("${{ needs.dependency-scan.result }}" "${{ needs.code-security-scan.result }}" "${{ needs.redis-security-scan.result }}" "${{ needs.docker-security-scan.result }}" "${{ needs.secrets-scan.result }}")
+        
+        for i in "${!jobs[@]}"; do
+          job="${jobs[$i]}"
+          result="${results[$i]}"
+          
+          if [ "$result" = "success" ]; then
+            echo "✅ **${job}**: Passed" >> security-summary.md
+          elif [ "$result" = "failure" ]; then
+            echo "❌ **${job}**: Failed" >> security-summary.md
+          else
+            echo "⚠️ **${job}**: $result" >> security-summary.md
+          fi
+        done
+        
+        echo "" >> security-summary.md
+        echo "## Detailed Reports" >> security-summary.md
+        echo "" >> security-summary.md
+        echo "Detailed security scan reports are available in the workflow artifacts." >> security-summary.md
+        echo "" >> security-summary.md
+        echo "### Redis Security Assessment" >> security-summary.md
+        
+        # Include Redis security results if available
+        if [ -f "security-reports/redis-security-report/redis-security-report.json" ]; then
+          echo "Redis security report found and included in artifacts." >> security-summary.md
+        fi
+        
+        echo "" >> security-summary.md
+        echo "---" >> security-summary.md
+        echo "*Generated by AfundiOS Security Pipeline*" >> security-summary.md
+
+    - name: Upload security summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-summary
+        path: security-summary.md
+
+    - name: Comment security summary on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('security-summary.md')) {
+            const summary = fs.readFileSync('security-summary.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+          }
