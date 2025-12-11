@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     daily_briefing_summary_style: str = "executive"  # bullet_points, executive, narrative
     daily_briefing_max_chars: int = 4000
 
+    # Redis Cache Configuration
+    redis_enabled: bool = True
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: Optional[str] = None
+    redis_db: int = 0
+    redis_cluster_enabled: bool = False
+    redis_cluster_nodes: str = "localhost:7000,localhost:7001,localhost:7002"
+    
+    # Cache TTL Configuration (in seconds)
+    cache_embedding_ttl: int = 3600  # 1 hour
+    cache_llm_response_ttl: int = 1800  # 30 minutes
+    cache_vector_search_ttl: int = 600  # 10 minutes
+    cache_conversation_ttl: int = 86400  # 24 hours
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from . import ingest, query, health, stats, conversation, graph, agents, maintenance, briefings
+from . import ingest, query, health, stats, conversation, graph, agents, maintenance, briefings, cache
 
 api_router = APIRouter()
 
@@ -13,3 +13,4 @@ api_router.include_router(graph.router, prefix="/graph", tags=["graph"])
 api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["maintenance"])
 api_router.include_router(briefings.router, prefix="/briefings", tags=["briefings"])
+api_router.include_router(cache.router, prefix="/cache", tags=["cache"])

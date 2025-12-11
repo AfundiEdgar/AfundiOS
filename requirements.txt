@@ -16,3 +16,5 @@ pytest-asyncio
 pytest-cov
 pytest-mock
 boto3
+redis
+redis-py-cluster
