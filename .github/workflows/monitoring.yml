@@ -1,479 +1,479 @@
-name: Monitoring & Maintenance
+# name: Monitoring & Maintenance
 
-on:
-  schedule:
-    # Run daily at 6 AM UTC
-    - cron: '0 6 * * *'
-    # Run weekly health checks on Sundays at 3 AM UTC
-    - cron: '0 3 * * 0'
-  workflow_dispatch:
-    inputs:
-      check_type:
-        description: 'Type of check to run'
-        required: true
-        default: 'health'
-        type: choice
-        options:
-        - health
-        - performance
-        - cache-cleanup
-        - full-maintenance
+# on:
+#   schedule:
+#     # Run daily at 6 AM UTC
+#     - cron: '0 6 * * *'
+#     # Run weekly health checks on Sundays at 3 AM UTC
+#     - cron: '0 3 * * 0'
+#   workflow_dispatch:
+#     inputs:
+#       check_type:
+#         description: 'Type of check to run'
+#         required: true
+#         default: 'health'
+#         type: choice
+#         options:
+#         - health
+#         - performance
+#         - cache-cleanup
+#         - full-maintenance
 
-jobs:
-  health-check:
-    runs-on: ubuntu-latest
-    if: github.event.schedule == '0 6 * * *' || github.event.inputs.check_type == 'health'
+# jobs:
+#   health-check:
+#     runs-on: ubuntu-latest
+#     if: github.event.schedule == '0 6 * * *' || github.event.inputs.check_type == 'health'
     
-    services:
-      redis:
-        image: redis:7.2-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+#     services:
+#       redis:
+#         image: redis:7.2-alpine
+#         ports:
+#           - 6379:6379
+#         options: >-
+#           --health-cmd "redis-cli ping"
+#           --health-interval 10s
+#           --health-timeout 5s
+#           --health-retries 5
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+#     steps:
+#     - name: Checkout code
+#       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+#     - name: Set up Python
+#       uses: actions/setup-python@v4
+#       with:
+#         python-version: '3.11'
+#         cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+#     - name: Install dependencies
+#       run: |
+#         python -m pip install --upgrade pip
+#         pip install -r requirements.txt
 
-    - name: Run health checks
-      run: |
-        cd backend
-        python -c "
-        import asyncio
-        import json
-        import time
-        from datetime import datetime
-        from core.cache import get_cache
-        from core.cached_embedder import create_cached_embedder
-        from core.cached_llm import create_cached_llm
+#     - name: Run health checks
+#       run: |
+#         cd backend
+#         python -c "
+#         import asyncio
+#         import json
+#         import time
+#         from datetime import datetime
+#         from core.cache import get_cache
+#         from core.cached_embedder import create_cached_embedder
+#         from core.cached_llm import create_cached_llm
         
-        async def run_health_checks():
-            print('🏥 Running AfundiOS Health Checks...')
-            health_report = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'checks': {}
-            }
+#         async def run_health_checks():
+#             print('🏥 Running AfundiOS Health Checks...')
+#             health_report = {
+#                 'timestamp': datetime.utcnow().isoformat(),
+#                 'checks': {}
+#             }
             
-            # Redis Cache Health
-            print('  📊 Checking Redis cache health...')
-            cache = get_cache()
-            cache_stats = cache.get_cache_stats()
-            health_report['checks']['redis_cache'] = {
-                'status': 'healthy' if cache_stats.get('connected') else 'unhealthy',
-                'details': cache_stats
-            }
+#             # Redis Cache Health
+#             print('  📊 Checking Redis cache health...')
+#             cache = get_cache()
+#             cache_stats = cache.get_cache_stats()
+#             health_report['checks']['redis_cache'] = {
+#                 'status': 'healthy' if cache_stats.get('connected') else 'unhealthy',
+#                 'details': cache_stats
+#             }
             
-            # Embedding Cache Health
-            print('  🧮 Checking embedding cache...')
-            try:
-                embedder = create_cached_embedder()
-                test_embedding = embedder.embed_query('health check test')
-                cached_embedding = embedder.embed_query('health check test')  # Should be cached
+#             # Embedding Cache Health
+#             print('  🧮 Checking embedding cache...')
+#             try:
+#                 embedder = create_cached_embedder()
+#                 test_embedding = embedder.embed_query('health check test')
+#                 cached_embedding = embedder.embed_query('health check test')  # Should be cached
                 
-                embedding_healthy = (
-                    test_embedding is not None and 
-                    cached_embedding is not None and 
-                    test_embedding == cached_embedding
-                )
-                health_report['checks']['embedding_cache'] = {
-                    'status': 'healthy' if embedding_healthy else 'unhealthy',
-                    'test_passed': embedding_healthy
-                }
-            except Exception as e:
-                health_report['checks']['embedding_cache'] = {
-                    'status': 'error',
-                    'error': str(e)
-                }
+#                 embedding_healthy = (
+#                     test_embedding is not None and 
+#                     cached_embedding is not None and 
+#                     test_embedding == cached_embedding
+#                 )
+#                 health_report['checks']['embedding_cache'] = {
+#                     'status': 'healthy' if embedding_healthy else 'unhealthy',
+#                     'test_passed': embedding_healthy
+#                 }
+#             except Exception as e:
+#                 health_report['checks']['embedding_cache'] = {
+#                     'status': 'error',
+#                     'error': str(e)
+#                 }
             
-            # Cache Performance Check
-            print('  ⚡ Checking cache performance...')
-            try:
-                start_time = time.time()
-                for i in range(100):
-                    cache.set_embedding(f'perf_test_{i}', [1.0] * 384)
-                    cache.get_embedding(f'perf_test_{i}')
+#             # Cache Performance Check
+#             print('  ⚡ Checking cache performance...')
+#             try:
+#                 start_time = time.time()
+#                 for i in range(100):
+#                     cache.set_embedding(f'perf_test_{i}', [1.0] * 384)
+#                     cache.get_embedding(f'perf_test_{i}')
                 
-                duration = time.time() - start_time
-                ops_per_second = 200 / duration  # 100 sets + 100 gets
+#                 duration = time.time() - start_time
+#                 ops_per_second = 200 / duration  # 100 sets + 100 gets
                 
-                performance_healthy = ops_per_second > 1000  # Should handle 1k ops/sec
-                health_report['checks']['cache_performance'] = {
-                    'status': 'healthy' if performance_healthy else 'degraded',
-                    'ops_per_second': ops_per_second,
-                    'duration_seconds': duration
-                }
-            except Exception as e:
-                health_report['checks']['cache_performance'] = {
-                    'status': 'error',
-                    'error': str(e)
-                }
+#                 performance_healthy = ops_per_second > 1000  # Should handle 1k ops/sec
+#                 health_report['checks']['cache_performance'] = {
+#                     'status': 'healthy' if performance_healthy else 'degraded',
+#                     'ops_per_second': ops_per_second,
+#                     'duration_seconds': duration
+#                 }
+#             except Exception as e:
+#                 health_report['checks']['cache_performance'] = {
+#                     'status': 'error',
+#                     'error': str(e)
+#                 }
             
-            # Memory Usage Check
-            print('  💾 Checking memory usage...')
-            try:
-                redis_info = cache._client.info('memory')
-                memory_used_mb = redis_info['used_memory'] / (1024 * 1024)
-                memory_healthy = memory_used_mb < 500  # Alert if > 500MB
+#             # Memory Usage Check
+#             print('  💾 Checking memory usage...')
+#             try:
+#                 redis_info = cache._client.info('memory')
+#                 memory_used_mb = redis_info['used_memory'] / (1024 * 1024)
+#                 memory_healthy = memory_used_mb < 500  # Alert if > 500MB
                 
-                health_report['checks']['memory_usage'] = {
-                    'status': 'healthy' if memory_healthy else 'warning',
-                    'memory_used_mb': memory_used_mb,
-                    'memory_details': {
-                        'used_memory_human': redis_info.get('used_memory_human', 'unknown'),
-                        'used_memory_peak_human': redis_info.get('used_memory_peak_human', 'unknown')
-                    }
-                }
-            except Exception as e:
-                health_report['checks']['memory_usage'] = {
-                    'status': 'error',
-                    'error': str(e)
-                }
+#                 health_report['checks']['memory_usage'] = {
+#                     'status': 'healthy' if memory_healthy else 'warning',
+#                     'memory_used_mb': memory_used_mb,
+#                     'memory_details': {
+#                         'used_memory_human': redis_info.get('used_memory_human', 'unknown'),
+#                         'used_memory_peak_human': redis_info.get('used_memory_peak_human', 'unknown')
+#                     }
+#                 }
+#             except Exception as e:
+#                 health_report['checks']['memory_usage'] = {
+#                     'status': 'error',
+#                     'error': str(e)
+#                 }
             
-            # Overall Health Status
-            statuses = [check.get('status') for check in health_report['checks'].values()]
-            if 'error' in statuses:
-                overall_status = 'critical'
-            elif 'unhealthy' in statuses:
-                overall_status = 'unhealthy'
-            elif 'warning' in statuses or 'degraded' in statuses:
-                overall_status = 'warning'
-            else:
-                overall_status = 'healthy'
+#             # Overall Health Status
+#             statuses = [check.get('status') for check in health_report['checks'].values()]
+#             if 'error' in statuses:
+#                 overall_status = 'critical'
+#             elif 'unhealthy' in statuses:
+#                 overall_status = 'unhealthy'
+#             elif 'warning' in statuses or 'degraded' in statuses:
+#                 overall_status = 'warning'
+#             else:
+#                 overall_status = 'healthy'
             
-            health_report['overall_status'] = overall_status
+#             health_report['overall_status'] = overall_status
             
-            # Save health report
-            with open('health_report.json', 'w') as f:
-                json.dump(health_report, f, indent=2)
+#             # Save health report
+#             with open('health_report.json', 'w') as f:
+#                 json.dump(health_report, f, indent=2)
             
-            print(f'✅ Health check completed. Overall status: {overall_status}')
+#             print(f'✅ Health check completed. Overall status: {overall_status}')
             
-            # Generate summary
-            summary = f'''# AfundiOS Health Report
+#             # Generate summary
+#             summary = f'''# AfundiOS Health Report
             
-**Date:** {health_report['timestamp']}  
-**Overall Status:** {overall_status.upper()}
+# **Date:** {health_report['timestamp']}  
+# **Overall Status:** {overall_status.upper()}
 
-## Component Status
-'''
-            for component, details in health_report['checks'].items():
-                status_emoji = {
-                    'healthy': '✅',
-                    'warning': '⚠️',
-                    'degraded': '🟡',
-                    'unhealthy': '❌',
-                    'error': '🔥'
-                }.get(details['status'], '❓')
+# ## Component Status
+# '''
+#             for component, details in health_report['checks'].items():
+#                 status_emoji = {
+#                     'healthy': '✅',
+#                     'warning': '⚠️',
+#                     'degraded': '🟡',
+#                     'unhealthy': '❌',
+#                     'error': '🔥'
+#                 }.get(details['status'], '❓')
                 
-                summary += f'- {status_emoji} **{component.replace('_', ' ').title()}**: {details['status']}\n'
+#                 summary += f'- {status_emoji} **{component.replace('_', ' ').title()}**: {details['status']}\n'
             
-            with open('health_summary.md', 'w') as f:
-                f.write(summary)
+#             with open('health_summary.md', 'w') as f:
+#                 f.write(summary)
             
-            return overall_status == 'healthy'
+#             return overall_status == 'healthy'
         
-        health_passed = asyncio.run(run_health_checks())
-        if not health_passed:
-            exit(1)
-        "
+#         health_passed = asyncio.run(run_health_checks())
+#         if not health_passed:
+#             exit(1)
+#         "
 
-    - name: Upload health reports
-      uses: actions/upload-artifact@v3
-      with:
-        name: health-reports
-        path: |
-          backend/health_report.json
-          backend/health_summary.md
+#     - name: Upload health reports
+#       uses: actions/upload-artifact@v3
+#       with:
+#         name: health-reports
+#         path: |
+#           backend/health_report.json
+#           backend/health_summary.md
 
-  cache-cleanup:
-    runs-on: ubuntu-latest
-    if: github.event.schedule == '0 3 * * 0' || github.event.inputs.check_type == 'cache-cleanup'
+#   cache-cleanup:
+#     runs-on: ubuntu-latest
+#     if: github.event.schedule == '0 3 * * 0' || github.event.inputs.check_type == 'cache-cleanup'
     
-    services:
-      redis:
-        image: redis:7.2-alpine
-        ports:
-          - 6379:6379
+#     services:
+#       redis:
+#         image: redis:7.2-alpine
+#         ports:
+#           - 6379:6379
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+#     steps:
+#     - name: Checkout code
+#       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+#     - name: Set up Python
+#       uses: actions/setup-python@v4
+#       with:
+#         python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        pip install redis
+#     - name: Install dependencies
+#       run: |
+#         pip install redis
 
-    - name: Run cache cleanup
-      run: |
-        python -c "
-        import redis
-        import json
-        import time
-        from datetime import datetime, timedelta
+#     - name: Run cache cleanup
+#       run: |
+#         python -c "
+#         import redis
+#         import json
+#         import time
+#         from datetime import datetime, timedelta
         
-        def cleanup_cache():
-            print('🧹 Starting cache cleanup...')
+#         def cleanup_cache():
+#             print('🧹 Starting cache cleanup...')
             
-            client = redis.Redis(host='localhost', port=6379, db=0)
+#             client = redis.Redis(host='localhost', port=6379, db=0)
             
-            cleanup_report = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'actions': [],
-                'stats': {}
-            }
+#             cleanup_report = {
+#                 'timestamp': datetime.utcnow().isoformat(),
+#                 'actions': [],
+#                 'stats': {}
+#             }
             
-            # Get initial stats
-            initial_info = client.info()
-            initial_keys = len(client.keys('*'))
-            initial_memory = initial_info['used_memory']
+#             # Get initial stats
+#             initial_info = client.info()
+#             initial_keys = len(client.keys('*'))
+#             initial_memory = initial_info['used_memory']
             
-            print(f'  📊 Initial state: {initial_keys} keys, {initial_memory / 1024 / 1024:.1f} MB')
+#             print(f'  📊 Initial state: {initial_keys} keys, {initial_memory / 1024 / 1024:.1f} MB')
             
-            # Clean up expired keys (force scan)
-            print('  🔍 Scanning for expired keys...')
-            expired_count = 0
-            for key in client.scan_iter(count=1000):
-                try:
-                    ttl = client.ttl(key)
-                    if ttl == -2:  # Key expired
-                        client.delete(key)
-                        expired_count += 1
-                except:
-                    continue
+#             # Clean up expired keys (force scan)
+#             print('  🔍 Scanning for expired keys...')
+#             expired_count = 0
+#             for key in client.scan_iter(count=1000):
+#                 try:
+#                     ttl = client.ttl(key)
+#                     if ttl == -2:  # Key expired
+#                         client.delete(key)
+#                         expired_count += 1
+#                 except:
+#                     continue
             
-            cleanup_report['actions'].append({
-                'action': 'remove_expired_keys',
-                'count': expired_count
-            })
+#             cleanup_report['actions'].append({
+#                 'action': 'remove_expired_keys',
+#                 'count': expired_count
+#             })
             
-            # Clean up old conversation caches (older than 7 days)
-            print('  💬 Cleaning old conversations...')
-            conv_pattern = 'conv:*'
-            old_conversations = 0
-            cutoff_time = time.time() - (7 * 24 * 3600)  # 7 days ago
+#             # Clean up old conversation caches (older than 7 days)
+#             print('  💬 Cleaning old conversations...')
+#             conv_pattern = 'conv:*'
+#             old_conversations = 0
+#             cutoff_time = time.time() - (7 * 24 * 3600)  # 7 days ago
             
-            for key in client.scan_iter(match=conv_pattern):
-                try:
-                    # Check if conversation is old based on last access
-                    last_access = client.object('idletime', key)
-                    if last_access and last_access > cutoff_time:
-                        client.delete(key)
-                        old_conversations += 1
-                except:
-                    continue
+#             for key in client.scan_iter(match=conv_pattern):
+#                 try:
+#                     # Check if conversation is old based on last access
+#                     last_access = client.object('idletime', key)
+#                     if last_access and last_access > cutoff_time:
+#                         client.delete(key)
+#                         old_conversations += 1
+#                 except:
+#                     continue
             
-            cleanup_report['actions'].append({
-                'action': 'remove_old_conversations',
-                'count': old_conversations
-            })
+#             cleanup_report['actions'].append({
+#                 'action': 'remove_old_conversations',
+#                 'count': old_conversations
+#             })
             
-            # Clean up large keys that might be consuming too much memory
-            print('  📦 Checking for oversized keys...')
-            large_keys = 0
-            for key in client.scan_iter(count=100):
-                try:
-                    memory = client.memory_usage(key)
-                    if memory and memory > 1024 * 1024:  # > 1MB
-                        # Log but don't delete automatically
-                        print(f'    ⚠️ Large key found: {key} ({memory / 1024 / 1024:.1f} MB)')
-                        large_keys += 1
-                except:
-                    continue
+#             # Clean up large keys that might be consuming too much memory
+#             print('  📦 Checking for oversized keys...')
+#             large_keys = 0
+#             for key in client.scan_iter(count=100):
+#                 try:
+#                     memory = client.memory_usage(key)
+#                     if memory and memory > 1024 * 1024:  # > 1MB
+#                         # Log but don't delete automatically
+#                         print(f'    ⚠️ Large key found: {key} ({memory / 1024 / 1024:.1f} MB)')
+#                         large_keys += 1
+#                 except:
+#                     continue
             
-            cleanup_report['actions'].append({
-                'action': 'identify_large_keys',
-                'count': large_keys
-            })
+#             cleanup_report['actions'].append({
+#                 'action': 'identify_large_keys',
+#                 'count': large_keys
+#             })
             
-            # Get final stats
-            final_info = client.info()
-            final_keys = len(client.keys('*'))
-            final_memory = final_info['used_memory']
+#             # Get final stats
+#             final_info = client.info()
+#             final_keys = len(client.keys('*'))
+#             final_memory = final_info['used_memory']
             
-            cleanup_report['stats'] = {
-                'keys_before': initial_keys,
-                'keys_after': final_keys,
-                'keys_removed': initial_keys - final_keys,
-                'memory_before_mb': initial_memory / 1024 / 1024,
-                'memory_after_mb': final_memory / 1024 / 1024,
-                'memory_freed_mb': (initial_memory - final_memory) / 1024 / 1024
-            }
+#             cleanup_report['stats'] = {
+#                 'keys_before': initial_keys,
+#                 'keys_after': final_keys,
+#                 'keys_removed': initial_keys - final_keys,
+#                 'memory_before_mb': initial_memory / 1024 / 1024,
+#                 'memory_after_mb': final_memory / 1024 / 1024,
+#                 'memory_freed_mb': (initial_memory - final_memory) / 1024 / 1024
+#             }
             
-            print(f'✅ Cleanup completed:')
-            print(f'  🗑️ Removed {initial_keys - final_keys} keys')
-            print(f'  💾 Freed {(initial_memory - final_memory) / 1024 / 1024:.1f} MB memory')
+#             print(f'✅ Cleanup completed:')
+#             print(f'  🗑️ Removed {initial_keys - final_keys} keys')
+#             print(f'  💾 Freed {(initial_memory - final_memory) / 1024 / 1024:.1f} MB memory')
             
-            with open('cleanup_report.json', 'w') as f:
-                json.dump(cleanup_report, f, indent=2)
+#             with open('cleanup_report.json', 'w') as f:
+#                 json.dump(cleanup_report, f, indent=2)
         
-        cleanup_cache()
-        "
+#         cleanup_cache()
+#         "
 
-    - name: Upload cleanup report
-      uses: actions/upload-artifact@v3
-      with:
-        name: cleanup-reports
-        path: cleanup_report.json
+#     - name: Upload cleanup report
+#       uses: actions/upload-artifact@v3
+#       with:
+#         name: cleanup-reports
+#         path: cleanup_report.json
 
-  dependency-updates:
-    runs-on: ubuntu-latest
-    if: github.event.schedule == '0 3 * * 0' || github.event.inputs.check_type == 'full-maintenance'
+#   dependency-updates:
+#     runs-on: ubuntu-latest
+#     if: github.event.schedule == '0 3 * * 0' || github.event.inputs.check_type == 'full-maintenance'
     
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+#     steps:
+#     - name: Checkout code
+#       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+#     - name: Set up Python
+#       uses: actions/setup-python@v4
+#       with:
+#         python-version: '3.11'
 
-    - name: Check for dependency updates
-      run: |
-        pip install pip-check-updates
+#     - name: Check for dependency updates
+#       run: |
+#         pip install pip-check-updates
         
-        echo "# Dependency Update Report" > dependency_updates.md
-        echo "" >> dependency_updates.md
-        echo "**Date:** $(date -u)" >> dependency_updates.md
-        echo "" >> dependency_updates.md
+#         echo "# Dependency Update Report" > dependency_updates.md
+#         echo "" >> dependency_updates.md
+#         echo "**Date:** $(date -u)" >> dependency_updates.md
+#         echo "" >> dependency_updates.md
         
-        # Check for outdated packages
-        pip list --outdated --format=json > outdated_packages.json
+#         # Check for outdated packages
+#         pip list --outdated --format=json > outdated_packages.json
         
-        if [ -s outdated_packages.json ] && [ "$(cat outdated_packages.json)" != "[]" ]; then
-          echo "## Outdated Packages" >> dependency_updates.md
-          echo "" >> dependency_updates.md
-          echo "| Package | Current | Latest |" >> dependency_updates.md
-          echo "|---------|---------|--------|" >> dependency_updates.md
+#         if [ -s outdated_packages.json ] && [ "$(cat outdated_packages.json)" != "[]" ]; then
+#           echo "## Outdated Packages" >> dependency_updates.md
+#           echo "" >> dependency_updates.md
+#           echo "| Package | Current | Latest |" >> dependency_updates.md
+#           echo "|---------|---------|--------|" >> dependency_updates.md
           
-          python -c "
-          import json
-          with open('outdated_packages.json') as f:
-              packages = json.load(f)
-          for pkg in packages:
-              print(f\"| {pkg['name']} | {pkg['version']} | {pkg['latest_version']} |\")
-          " >> dependency_updates.md
-        else
-          echo "✅ All packages are up to date!" >> dependency_updates.md
-        fi
+#           python -c "
+#           import json
+#           with open('outdated_packages.json') as f:
+#               packages = json.load(f)
+#           for pkg in packages:
+#               print(f\"| {pkg['name']} | {pkg['version']} | {pkg['latest_version']} |\")
+#           " >> dependency_updates.md
+#         else
+#           echo "✅ All packages are up to date!" >> dependency_updates.md
+#         fi
 
-    - name: Upload dependency report
-      uses: actions/upload-artifact@v3
-      with:
-        name: dependency-reports
-        path: |
-          dependency_updates.md
-          outdated_packages.json
+#     - name: Upload dependency report
+#       uses: actions/upload-artifact@v3
+#       with:
+#         name: dependency-reports
+#         path: |
+#           dependency_updates.md
+#           outdated_packages.json
 
-  create-maintenance-issue:
-    runs-on: ubuntu-latest
-    needs: [health-check, cache-cleanup, dependency-updates]
-    if: always() && (failure() || needs.health-check.result == 'failure')
+#   create-maintenance-issue:
+#     runs-on: ubuntu-latest
+#     needs: [health-check, cache-cleanup, dependency-updates]
+#     if: always() && (failure() || needs.health-check.result == 'failure')
     
-    steps:
-    - name: Create maintenance issue
-      uses: actions/github-script@v6
-      with:
-        script: |
-          const healthStatus = '${{ needs.health-check.result }}';
-          const cleanupStatus = '${{ needs.cache-cleanup.result }}';
-          const depStatus = '${{ needs.dependency-updates.result }}';
+#     steps:
+#     - name: Create maintenance issue
+#       uses: actions/github-script@v6
+#       with:
+#         script: |
+#           const healthStatus = '${{ needs.health-check.result }}';
+#           const cleanupStatus = '${{ needs.cache-cleanup.result }}';
+#           const depStatus = '${{ needs.dependency-updates.result }}';
           
-          let issueBody = `# 🚨 Automated Maintenance Alert\n\n`;
-          issueBody += `**Date:** ${new Date().toISOString()}\n`;
-          issueBody += `**Triggered by:** Scheduled monitoring workflow\n\n`;
+#           let issueBody = `# 🚨 Automated Maintenance Alert\n\n`;
+#           issueBody += `**Date:** ${new Date().toISOString()}\n`;
+#           issueBody += `**Triggered by:** Scheduled monitoring workflow\n\n`;
           
-          issueBody += `## Status Summary\n\n`;
-          issueBody += `- Health Check: ${healthStatus === 'success' ? '✅' : '❌'} ${healthStatus}\n`;
-          issueBody += `- Cache Cleanup: ${cleanupStatus === 'success' ? '✅' : '❌'} ${cleanupStatus}\n`;
-          issueBody += `- Dependency Check: ${depStatus === 'success' ? '✅' : '❌'} ${depStatus}\n\n`;
+#           issueBody += `## Status Summary\n\n`;
+#           issueBody += `- Health Check: ${healthStatus === 'success' ? '✅' : '❌'} ${healthStatus}\n`;
+#           issueBody += `- Cache Cleanup: ${cleanupStatus === 'success' ? '✅' : '❌'} ${cleanupStatus}\n`;
+#           issueBody += `- Dependency Check: ${depStatus === 'success' ? '✅' : '❌'} ${depStatus}\n\n`;
           
-          if (healthStatus === 'failure') {
-            issueBody += `## ⚠️ Health Check Failed\n\n`;
-            issueBody += `The automated health check has detected issues that require attention:\n\n`;
-            issueBody += `**Immediate Actions Required:**\n`;
-            issueBody += `1. Check Redis cache connectivity\n`;
-            issueBody += `2. Verify embedding cache functionality\n`;
-            issueBody += `3. Review cache performance metrics\n`;
-            issueBody += `4. Check memory usage patterns\n\n`;
-          }
+#           if (healthStatus === 'failure') {
+#             issueBody += `## ⚠️ Health Check Failed\n\n`;
+#             issueBody += `The automated health check has detected issues that require attention:\n\n`;
+#             issueBody += `**Immediate Actions Required:**\n`;
+#             issueBody += `1. Check Redis cache connectivity\n`;
+#             issueBody += `2. Verify embedding cache functionality\n`;
+#             issueBody += `3. Review cache performance metrics\n`;
+#             issueBody += `4. Check memory usage patterns\n\n`;
+#           }
           
-          issueBody += `## Investigation Steps\n\n`;
-          issueBody += `1. Review the workflow artifacts for detailed reports\n`;
-          issueBody += `2. Check application logs for error patterns\n`;
-          issueBody += `3. Monitor Redis performance and connectivity\n`;
-          issueBody += `4. Verify system resource availability\n\n`;
+#           issueBody += `## Investigation Steps\n\n`;
+#           issueBody += `1. Review the workflow artifacts for detailed reports\n`;
+#           issueBody += `2. Check application logs for error patterns\n`;
+#           issueBody += `3. Monitor Redis performance and connectivity\n`;
+#           issueBody += `4. Verify system resource availability\n\n`;
           
-          issueBody += `## Workflow Run\n\n`;
-          issueBody += `[View workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n\n`;
+#           issueBody += `## Workflow Run\n\n`;
+#           issueBody += `[View workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n\n`;
           
-          issueBody += `---\n*This issue was created automatically by the monitoring workflow.*`;
+#           issueBody += `---\n*This issue was created automatically by the monitoring workflow.*`;
           
-          // Create the issue
-          const issue = await github.rest.issues.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            title: `🚨 Maintenance Required - ${new Date().toISOString().split('T')[0]}`,
-            body: issueBody,
-            labels: ['maintenance', 'automated', 'urgent']
-          });
+#           // Create the issue
+#           const issue = await github.rest.issues.create({
+#             owner: context.repo.owner,
+#             repo: context.repo.repo,
+#             title: `🚨 Maintenance Required - ${new Date().toISOString().split('T')[0]}`,
+#             body: issueBody,
+#             labels: ['maintenance', 'automated', 'urgent']
+#           });
           
-          console.log('Created maintenance issue:', issue.data.number);
+#           console.log('Created maintenance issue:', issue.data.number);
 
-  monitoring-summary:
-    runs-on: ubuntu-latest
-    needs: [health-check, cache-cleanup, dependency-updates]
-    if: always()
+#   monitoring-summary:
+#     runs-on: ubuntu-latest
+#     needs: [health-check, cache-cleanup, dependency-updates]
+#     if: always()
     
-    steps:
-    - name: Generate monitoring summary
-      run: |
-        cat > monitoring_summary.md << 'EOF'
-        # 📊 AfundiOS Monitoring Summary
+#     steps:
+#     - name: Generate monitoring summary
+#       run: |
+#         cat > monitoring_summary.md << 'EOF'
+#         # 📊 AfundiOS Monitoring Summary
         
-        **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        **Workflow:** Automated Monitoring & Maintenance
+#         **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+#         **Workflow:** Automated Monitoring & Maintenance
         
-        ## Results Summary
+#         ## Results Summary
         
-        | Component | Status | Details |
-        |-----------|--------|---------|
-        | Health Check | ${{ needs.health-check.result }} | Core system health verification |
-        | Cache Cleanup | ${{ needs.cache-cleanup.result }} | Redis cache maintenance |
-        | Dependency Updates | ${{ needs.dependency-updates.result }} | Package update checking |
+#         | Component | Status | Details |
+#         |-----------|--------|---------|
+#         | Health Check | ${{ needs.health-check.result }} | Core system health verification |
+#         | Cache Cleanup | ${{ needs.cache-cleanup.result }} | Redis cache maintenance |
+#         | Dependency Updates | ${{ needs.dependency-updates.result }} | Package update checking |
         
-        ## Next Steps
+#         ## Next Steps
         
-        - Review detailed reports in workflow artifacts
-        - Address any failed components immediately
-        - Schedule manual maintenance if required
+#         - Review detailed reports in workflow artifacts
+#         - Address any failed components immediately
+#         - Schedule manual maintenance if required
         
-        ---
-        *Automated monitoring report*
-        EOF
+#         ---
+#         *Automated monitoring report*
+#         EOF
 
-    - name: Upload monitoring summary
-      uses: actions/upload-artifact@v3
-      with:
-        name: monitoring-summary
-        path: monitoring_summary.md
+#     - name: Upload monitoring summary
+#       uses: actions/upload-artifact@v3
+#       with:
+#         name: monitoring-summary
+#         path: monitoring_summary.md
